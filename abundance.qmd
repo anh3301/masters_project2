@@ -1,0 +1,472 @@
+---
+title: "diff.abund"
+author: "Anh Nguyen Phuong"
+format: html
+editor: visual
+---
+
+# Differential Abundance
+
+## Load Libraries
+
+```{r}
+#clear environment
+rm(list=ls())
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(ggpubr)
+library(reshape2)
+library(edgeR)
+library(scuttle)
+
+#load figures theme
+source("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/theme_manuscript.R")
+```
+
+## Load Data
+
+Directories:
+
+```{r}
+#output
+dir.out <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/abundance/output/"
+```
+
+Files:
+
+```{r}
+#load sce file
+sce <- readRDS("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/tide/output/sce.tnbc.tide.RDS")
+```
+
+## Dysfunction
+
+### Pre-treatment
+
+```{r}
+#number of cells per cell type per patient
+abund.pre <- as.data.frame.matrix(table(sce[,sce$timepoint == "Pre"]$type, sce[,sce$timepoint == "Pre"]$patient_id))
+
+#merge epithelial and basal into cancer cells
+merg <- abund.pre["Basal",] + abund.pre["Epithelial",] #sum epi + basal
+
+abund.pre[nrow(abund.pre) + 1,] <- merg #add to abundance df
+
+abund.pre <- abund.pre[-c(2,6),] #removed epi and basal abundance
+
+rownames(abund.pre)[rownames(abund.pre) == "12"] <- "Cancer cells" #rename to cancer cells
+
+rm(merg)
+
+#create a dge list and attach column metadata
+extra.info <- colData(sce[,sce$timepoint == "Pre"])[match(colnames(abund.pre), sce[,sce$timepoint == "Pre"]$patient_id),]
+
+dys.pre.ab <- DGEList(abund.pre, samples=extra.info)
+
+rm(extra.info)
+
+#filter out low abundance cell types
+keep <- filterByExpr(dys.pre.ab, group=dys.pre.ab$samples$Dysfunction)
+
+summary(keep) #no cell type excluded
+
+rm(keep)
+
+#compute design matrix - dysfunction score as continuous covariate
+design <- model.matrix(~Dysfunction, dys.pre.ab$samples)
+
+#estimate negative binomial dispersions
+dys.pre.ab <- estimateDisp(dys.pre.ab, design, trend="none")
+summary(dys.pre.ab$common.dispersion)
+
+#compute differential abundance through quasi-likelihood f-test
+dys.fit.pre <- glmQLFit(dys.pre.ab, design, robust=TRUE, abundance.trend=FALSE)
+summary(dys.fit.pre$var.prior)
+summary(dys.fit.pre$df.prior)
+
+
+dys.res.pre <- glmQLFTest(dys.fit.pre, coef=ncol(design))
+summary(decideTests(dys.res.pre))
+
+dys.pre <- topTags(dys.res.pre)$table
+dys.pre$type <- rownames(dys.pre)
+```
+
+```{r}
+#plot
+pdf(file = paste0(dir.out,"dys.pre.pdf") ,width = 10)
+
+ggplot(dys.pre, aes(x= type, y=logFC, fill = FDR)) +
+  geom_bar(stat="identity") +
+  coord_flip()+
+  xlab("")+ ylab ('LogFC') + ylim(c(-1,1))+
+  theme_manuscript()+
+  labs(fill = 'FDR')+
+  theme(legend.position='right', legend.direction='vertical',  panel.grid.major.x = element_blank(),
+        axis.title = element_text(vjust = 1, hjust = 0.50),legend.key.width= unit(0.3, 'cm'))+
+  scale_fill_gradientn(colours = c('#074572','#0B5A92','#8DC4EC','#B7D6EC'),
+                       limits = c(0.0001,0.1),
+                       breaks = c(0.0001,0.001,0.01,0.1),
+                       labels = c('0.0001','0.001','0.01','0.1'),
+                       transform = 'log10') +
+  ggtitle("Pre-treatment")
+
+dev.off()
+```
+
+### On-treatment
+
+```{r}
+#number of cells per cell type per patient
+abund.on <- as.data.frame.matrix(table(sce[,sce$timepoint == "On"]$type, sce[,sce$timepoint == "On"]$patient_id))
+
+#merge epithelial and basal into cancer cells
+merg <- abund.on["Basal",] + abund.on["Epithelial",] #sum epi + basal
+
+abund.on[nrow(abund.on) + 1,] <- merg
+
+abund.on <- abund.on[-c(2,6),]
+
+rownames(abund.on)[rownames(abund.on) == "12"] <- "Cancer cells"
+
+rm(merg)
+
+#create a dge list and attach column metadata
+extra.info <- colData(sce[,sce$timepoint == "On"])[match(colnames(abund.on), sce[,sce$timepoint == "On"]$patient_id),]
+
+dys.on.ab <- DGEList(abund.on, samples=extra.info)
+
+rm(extra.info)
+
+#filter out low abundance cell types
+keep <- filterByExpr(dys.on.ab, group=dys.on.ab$samples$Dysfunction)
+
+summary(keep) #no cell type excluded
+
+rm(keep)
+
+#estimate negative binomial dispersions
+dys.on.ab <- estimateDisp(dys.on.ab, design, trend="none")
+
+#compute differential abundance
+dys.fit.on <- glmQLFit(dys.on.ab, design, robust=TRUE, abundance.trend=FALSE)
+
+
+dys.res.on <- glmQLFTest(dys.fit.on, coef=ncol(design))
+
+summary(decideTests(dys.res.on))
+
+dys.on <- topTags(dys.res.on)$table
+
+dys.on$type <- rownames(dys.on)
+```
+
+```{r}
+#plot
+pdf(file=paste0(dir.out,"dys.on.pdf"),width = 10)
+
+ggplot(dys.on, aes(x= type, y=logFC, fill = FDR)) +
+  geom_bar(stat="identity") +
+  coord_flip()+
+  xlab("")+ ylab ('LogFC') + ylim(c(-1,1))+
+  theme_manuscript()+
+  labs(fill = 'FDR')+
+  theme(legend.position='right', legend.direction='vertical',  panel.grid.major.x = element_blank(),
+        axis.title = element_text(vjust = 1, hjust = 0.50),legend.key.width= unit(0.3, 'cm'))+
+  scale_fill_gradientn(colours = c('#074572','#0B5A92','#8DC4EC','#B7D6EC'),
+                       limits = c(0.0001,0.1),
+                       breaks = c(0.0001,0.001,0.01,0.1),
+                       labels = c('0.0001','0.001','0.01','0.1'),
+                       transform = 'log10') +
+  ggtitle("On-treatment")
+
+dev.off()
+```
+
+## Exclusion
+
+### Pre-treatment
+
+```{r}
+#create a dge list and attach column metadata
+extra.info <- colData(sce[,sce$timepoint == "Pre"])[match(colnames(abund.pre), sce[,sce$timepoint == "Pre"]$patient_id),]
+
+ex.pre.ab <- DGEList(abund.pre, samples=extra.info)
+
+rm(extra.info)
+
+#filter out low abundance cell types
+keep <- filterByExpr(ex.pre.ab, group=ex.pre.ab$samples$Exclusion)
+
+summary(keep) #no cell type excluded
+
+rm(keep)
+
+#compute design matrix
+design.ex <- model.matrix(~Exclusion, ex.pre.ab$samples)
+
+#estimate negative binomial dispersions
+ex.pre.ab <- estimateDisp(ex.pre.ab, design.ex, trend="none")
+summary(ex.pre.ab$common.dispersion)
+
+#compute differential abundance
+ex.fit.pre <- glmQLFit(ex.pre.ab, design.ex, robust=TRUE, abundance.trend=FALSE)
+summary(ex.fit.pre$var.prior)
+summary(ex.fit.pre$df.prior)
+
+ex.res.pre <- glmQLFTest(ex.fit.pre, coef=ncol(design.ex))
+summary(decideTests(ex.res.pre))
+ex.pre <- topTags(ex.res.pre)$table
+ex.pre$type <- rownames(ex.pre)
+```
+
+```{r}
+#plot
+pdf(file=paste0(dir.out,"ex.pre.pdf"),width = 10)
+
+ggplot(ex.pre, aes(x= type, y=logFC, fill = FDR)) +
+  geom_bar(stat="identity") +
+  coord_flip()+
+  xlab("")+ ylab ('LogFC') + ylim(c(-0.5,0.5))+
+  theme_manuscript()+
+  labs(fill = 'FDR')+
+  theme(legend.position='right', legend.direction='vertical',  panel.grid.major.x = element_blank(),
+        axis.title = element_text(vjust = 1, hjust = 0.50),legend.key.width= unit(0.3, 'cm'))+
+  scale_fill_gradientn(colours = c('#074572','#0B5A92','#8DC4EC','#B7D6EC'),
+                       limits = c(0.0001,0.1),
+                       breaks = c(0.0001,0.001,0.01,0.1),
+                       labels = c('0.0001','0.001','0.01','0.1'),
+                       transform = 'log10') +
+  ggtitle("Pre-treatment")
+
+dev.off()
+```
+
+### On-treatment
+
+```{r}
+#create a dge list and attach column metadata
+extra.info <- colData(sce[,sce$timepoint == "On"])[match(colnames(abund.on), sce[,sce$timepoint == "On"]$patient_id),]
+
+ex.on.ab <- DGEList(abund.on, samples=extra.info)
+
+rm(extra.info)
+
+#filter out low abundance cell types
+keep <- filterByExpr(ex.on.ab, group=ex.on.ab$samples$Exclusion)
+
+summary(keep) #no cell type excluded
+
+
+rm(keep)
+
+#estimate negative binomial dispersions
+ex.on.ab <- estimateDisp(ex.on.ab, design.ex, trend="none")
+summary(ex.on.ab$common.dispersion)
+
+#compute differential abundance
+ex.fit.on <- glmQLFit(ex.on.ab, design.ex, robust=TRUE, abundance.trend=FALSE)
+summary(ex.fit.on$var.prior)
+summary(ex.fit.on$df.prior)
+
+ex.res.on <- glmQLFTest(ex.fit.on, coef=ncol(design.ex))
+summary(decideTests(ex.res.on))
+ex.on <- topTags(ex.res.on)$table
+ex.on$type <- rownames(ex.on)
+```
+
+```{r}
+#plot
+pdf(file=paste0(dir.out,"ex.on.pdf"),width = 10)
+
+ggplot(ex.on, aes(x= type, y=logFC, fill = FDR)) +
+  geom_bar(stat="identity") +
+  coord_flip()+
+  xlab("")+ ylab ('LogFC') + ylim(c(-0.5,0.5))+
+  theme_manuscript()+
+  labs(fill = 'FDR')+
+  theme(legend.position='right', legend.direction='vertical',  panel.grid.major.x = element_blank(),
+        axis.title = element_text(vjust = 1, hjust = 0.50),legend.key.width= unit(0.3, 'cm'))+
+  scale_fill_gradientn(colours = c('#074572','#0B5A92','#8DC4EC','#B7D6EC'),
+                       limits = c(0.0001,0.1),
+                       breaks = c(0.0001,0.001,0.01,0.1),
+                       labels = c('0.0001','0.001','0.01','0.1'),
+                       transform = 'log10') +
+  ggtitle("On-treatment")
+
+dev.off()
+```
+
+## Cell Proportions
+
+### Pre-treatment
+
+```{r}
+#compute cell proportions
+pre.prop <- as.data.frame.matrix(prop.table(table(sce[,sce$timepoint == "Pre"]$type, sce[,sce$timepoint == "Pre"]$patient_id), margin = 2))
+
+#merging epithelial and basal cells
+pre.prop["Cancer cells",] <- pre.prop["Epithelial",] + pre.prop["Basal",]
+pre.prop <- pre.prop[-c(2,6),] #remove epithelial and basal
+
+#add dysfunction and exclusion info
+pre.prop <- merge(t(pre.prop), unique(colData(sce[,sce$timepoint == "Pre"])[,c("patient_id","Dysfunction","Dysfunction.binary","Exclusion","Exclusion.binary")]), by.x = 0, by.y = "patient_id")
+
+#melt
+pre.melt <- melt(pre.prop,id.vars=c(c("Row.names","Dysfunction","Exclusion","Dysfunction.binary","Exclusion.binary")))
+```
+
+### On-treatment
+
+```{r}
+#compute cell proportions
+on.prop <- as.data.frame.matrix(prop.table(table(sce[,sce$timepoint == "On"]$type, sce[,sce$timepoint == "On"]$patient_id), margin = 2))
+
+#merging epithelial and basal cells
+on.prop["Cancer cells",] <- on.prop["Epithelial",] + on.prop["Basal",]
+on.prop <- on.prop[-c(2,6),] #remove epithelial and basal
+
+#add dysfunction and exclusion info
+on.prop <- merge(t(on.prop), unique(colData(sce[,sce$timepoint == "On"])[,c("patient_id","Dysfunction","Dysfunction.binary","Exclusion","Exclusion.binary")]), by.x = 0, by.y = "patient_id")
+
+#melt
+on.melt <- melt(on.prop,id.vars=c(c("Row.names","Dysfunction","Exclusion","Dysfunction.binary","Exclusion.binary")))
+```
+
+### Pre vs. On
+
+```{r}
+pre.melt$Treatment <- "Pre-treatment"
+on.melt$Treatment <- "On-treatment"
+
+melt.all <- rbind(pre.melt,on.melt)
+
+#no difference in any cell type pre vs. on
+ggplot(melt.all,aes(x=Treatment,y=value)) +
+  geom_boxplot() +
+  stat_compare_means(method="wilcox") +
+  facet_wrap(~variable)
+```
+
+### T Cells in High vs. Low Dysfunction
+
+#### CD8+ T Cells
+
+```{r}
+pdf(file=paste0(dir.out,"dys.ct.pre.pdf"), width = 8)
+
+ggplot(pre.melt[pre.melt$variable == "CD8+ T cells",],aes(x=value,y=Dysfunction,color = Dysfunction.binary)) +
+  theme_manuscript() +
+  geom_point(size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  labs(title = "CD8+ T cells (Pre-treatment)", x = "Cell proportion", y = "Dysfunction score", color = "Dysfunction")
+
+dev.off()
+```
+
+```{r}
+pdf(file=paste0(dir.out,"dys.ct.on.pdf"), width = 8)
+
+ggplot(on.melt[on.melt$variable == "CD8+ T cells",],aes(x=value,y=Dysfunction,color = Dysfunction.binary)) +
+  theme_manuscript() +
+  geom_point(size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  labs(title = "CD8+ T cells (On-treatment)", x = "Cell proportion", y = "Dysfunction score", color = "Dysfunction")
+
+dev.off()
+```
+
+#### CD4+ T Cells
+
+```{r}
+pdf(file=paste0(dir.out,"dys.ht.pre.pdf"), width = 8)
+
+ggplot(pre.melt[pre.melt$variable == "CD4+ T cells",],aes(x=value,y=Dysfunction,color = Dysfunction.binary)) +
+  theme_manuscript() +
+  geom_point(size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  labs(title = "CD4+ T cells (Pre-treatment)", x = "Cell proportion", y = "Dysfunction score", color = "Dysfunction")
+
+dev.off()
+```
+
+```{r}
+pdf(file=paste0(dir.out,"dys.ht.on.pdf"), width = 8)
+
+ggplot(on.melt[on.melt$variable == "CD4+ T cells",],aes(x=value,y=Dysfunction,color = Dysfunction.binary)) +
+  theme_manuscript() +
+  geom_point(size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  labs(title = "CD4+ T cells (On-treatment)", x = "Cell proportion", y = "Dysfunction score", color = "Dysfunction")
+
+dev.off()
+```
+
+## Fibroblasts in High vs. Low Exclusion
+
+```{r}
+pdf(file=paste0(dir.out,"ex.fibro.pre.pdf"), width = 8)
+
+ggplot(pre.melt[pre.melt$variable == "Fibroblasts",],aes(x=value,y=Exclusion,color = Exclusion.binary)) +
+  theme_manuscript() +
+  geom_point(size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  labs(title = "Fibroblasts (Pre-treatment)", x = "Cell proportion", y = "Exclusion score", color = "Exclusion")
+
+dev.off()
+```
+
+```{r}
+pdf(file=paste0(dir.out,"ex.fibro.on.pdf"), width = 8)
+
+ggplot(on.melt[pre.melt$variable == "Fibroblasts",],aes(x=value,y=Exclusion,color = Exclusion.binary)) +
+  theme_manuscript() +
+  geom_point(size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  labs(title = "Fibroblasts (On-treatment)", x = "Cell proportion", y = "Exclusion score", color = "Exclusion")
+
+dev.off()
+```
+
+## General Distribution
+
+```{r}
+#plot cells per patient
+cell.dens <- as.data.frame(table(sce$patient_id,sce$timepoint))
+
+cell.dens$Var2 <- factor(cell.dens$Var2, levels=c("Pre", "On"))
+
+#plot
+pdf(file=paste0(dir.out,"cell.dens.pdf"), width = 12)
+
+ggplot(cell.dens,aes(y=Freq,x=reorder(Var1, -Freq)))+
+  theme_manuscript() +
+  geom_bar(stat="identity",aes(fill=Var1),show.legend = F) +
+  scale_fill_manual(values = c("#001219","#0A9396","#CA6702","#BB3E03","#005F73","#023047","#94D2BD","#EE9B00","#9B2226","#E9D8A6","#ffb703","#AE2012")) +
+  ylab("Number of cells") +
+  xlab("") +
+  facet_wrap(~Var2, labeller = labeller(Var2 = c(Pre = "Pre-treatment", On = "On-treatment"))) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+dev.off()
+```
+
+```{r}
+#cell type proportions
+
+pdf(file=paste0(dir.out,"cell.prop.pdf"), width = 10)
+
+ggplot(melt.all,aes(x=variable,y=value)) +
+  theme_manuscript() +
+  geom_boxplot(aes(fill=variable),show.legend = F) +
+  scale_fill_manual(values = c("#2E86AB","#F0C808","#92BDA3","#AFE3C0","#890620","#F06449","#32746D","#A40E4C","#BCB6FF","#F26A8D")) +
+  facet_wrap(~Treatment) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  xlab("") +
+  ylab("Cell proportion")
+
+dev.off()
+```
