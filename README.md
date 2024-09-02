@@ -4,6 +4,10 @@ This repository contains R and Python scripts to reproduce the analysis for a th
 
 **QC:** Data processing steps (i.e. quality control and single-cell object/anndata construction).
 
+**metacells:** Pre-processing steps for metacells iterations, quality control, and finalising the output of metacells.
+
+**Metacells_iteration_1-3:**: Metacell construction files submitted to the cluster.
+
 **tide:** Normalising and generating pseudobulks for the TIDE framework.
 
 **abundance:** Differential abundance analysis and cell proportions.
@@ -12,8 +16,6 @@ This repository contains R and Python scripts to reproduce the analysis for a th
 
 **dif.expr:** Differential expression analysis.
 
-**metacells:** Pre-processing steps for metacells iterations, quality control, and finalising the output of metacells.
-
-**Metacells_iteration_1-3:**: Metacell construction files submitted to the cluster.
+**cafs:** Enrichment of CAF populations.
 
 **theme_manuscript:** Plot theme used for data visualisation.
