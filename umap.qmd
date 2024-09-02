@@ -1,0 +1,313 @@
+---
+title: "umap"
+author: "Anh Nguyen Phuong"
+format: html
+editor: visual
+---
+
+# Dimensionality Reduction
+
+## Load Libraries
+
+```{r}
+#clear environment
+rm(list=ls())
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(ggpubr)
+library(scuttle)
+library(scran)
+
+#load figures theme
+source("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/theme_manuscript.R")
+```
+
+## Load Data
+
+Directories:
+
+```{r}
+#output
+dir.out <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/umap/output/"
+```
+
+Files:
+
+```{r}
+#load sce file
+sce <- readRDS("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/tide/output/sce.tnbc.tide.RDS")
+```
+
+## UMAP
+
+```{r}
+#merge epithelial and basal
+colda <- colData(sce)
+
+colda$type[colda$type == "Epithelial" | colda$type == "Basal"] <- "Cancer cells"
+
+colData(sce) <- colda
+
+rm(colda)
+```
+
+```{r}
+#log-normalised counts for umap
+sce.log <- sce
+
+sce.log <- logNormCounts(sce.log)
+
+#cell types of interest
+cell.type <- c("Cancer cells", "CD8+ T cells", "CD4+ T cells","Fibroblasts")
+```
+
+### Exclusion
+
+#### Pre-treatment
+
+```{r}
+for(c in cell.type){
+  
+  set.seed(100)
+  
+  #subset per cell type
+  pre.cell <- sce.log[,c(sce.log$type == c & sce.log$timepoint == "Pre")]
+  
+  #compute highly variable genes
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  #compute pca
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  #compute umap
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  #extract umap coordinates
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+  #creat a df with umap coordinates and tide score for plotting
+  umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      Exclusion = colData(umap)$Exclusion.binary)
+  
+  #plot and save pdf
+  plot <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Exclusion)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(title = paste0(c," (Pre-treatment)"),
+       x = "UMAP 1", y = "UMAP 2", color = "Exclusion score") +
+    scale_color_manual(values = c("#F93943","#348AA7"))
+  
+  file <- file.path(paste0(dir.out, c, "umap.pre.pdf"))
+  pdf(file,width=8)
+  print(plot)
+  dev.off()
+}
+```
+
+#### On-treatment
+
+```{r}
+#repeat the same on-treatment
+for(c in cell.type){
+  
+  set.seed(100)
+  
+  pre.cell <- sce.log[,c(sce.log$type == c & sce.log$timepoint == "On")]
+  
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+  umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      Exclusion = colData(umap)$Exclusion.binary)
+  
+  plot <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Exclusion)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(title = paste0(c," (On-treatment)"),
+       x = "UMAP 1", y = "UMAP 2", color = "Exclusion score") +
+    scale_color_manual(values = c("#F93943","#348AA7"))
+  
+  file <- file.path(paste0(dir.out, c, "umap.on.pdf"))
+  pdf(file,width=8)
+  print(plot)
+  dev.off()
+}
+```
+
+```{r}
+set.seed(100)
+  
+  pre.cell <- sce.log[,c(sce.log$type == "Fibroblasts" & sce.log$timepoint == "On")]
+  
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      ACTA2 = logcounts(umap)["ACTA2",])
+
+pdf(file="/Users/aphuong/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Bassez_scRNA/Code/diff.express/output/fibro.acta2.on.pdf", width = 9)
+  
+  ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = ACTA2)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(x = "UMAP 1", y = "UMAP 2", color = "ACTA2 expression") +
+    scale_color_gradient(low = "white", high = "#F93943")
+  
+dev.off()
+```
+
+### Dysfunction
+
+#### Pre-treatment
+
+```{r}
+#repeat for dysfunction
+for(c in cell.type){
+  
+  set.seed(100)
+  
+  pre.cell <- sce.log[,c(sce.log$type == c & sce.log$timepoint == "Pre")]
+  
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+  umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      Dysfunction = colData(umap)$Dysfunction.binary)
+  
+  plot <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Dysfunction)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(title = paste0(c," (Pre-treatment)"),
+       x = "UMAP 1", y = "UMAP 2", color = "Dysfunction score") +
+    scale_color_manual(values = c("#F93943","#348AA7"))
+  
+  file <- file.path(paste0(dir.out, c, "umap.dys.pre.pdf"))
+  pdf(file,width=8)
+  print(plot)
+  dev.off()
+}
+```
+
+#### On-treatment
+
+```{r}
+#repeat on-treatment
+for(c in cell.type){
+  
+  set.seed(100)
+  
+  pre.cell <- sce.log[,c(sce.log$type == c & sce.log$timepoint == "On")]
+  
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+  umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      Dysfunction = colData(umap)$Dysfunction.binary)
+  
+  plot <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Dysfunction)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(title = paste0(c," (On-treatment)"),
+       x = "UMAP 1", y = "UMAP 2", color = "Dysfunction score") +
+    scale_color_manual(values = c("#F93943","#348AA7"))
+  
+  file <- file.path(paste0(dir.out, c, "umap.dys.on.pdf"))
+  pdf(file,width=8)
+  print(plot)
+  dev.off()
+}
+```
+
+### By Patient
+
+#### Pre-treatment
+
+```{r}
+#repeat color by patient
+for(c in cell.type){
+  
+  set.seed(100)
+  
+  pre.cell <- sce.log[,c(sce.log$type == c & sce.log$timepoint == "Pre")]
+  
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+  umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      Patient = colData(umap)$patient_id)
+  
+  plot <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Patient)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(title = paste0(c," (Pre-treatment)"),
+       x = "UMAP 1", y = "UMAP 2", color = "Patient") 
+    #scale_color_manual(values = c("#F93943","#348AA7"))
+  
+  file <- file.path(paste0(dir.out, c, "umap.patient.pre.pdf"))
+  pdf(file,width=10)
+  print(plot)
+  dev.off()
+}
+```
+
+#### On-treatment
+
+```{r}
+for(c in cell.type){
+  
+  set.seed(100)
+  
+  pre.cell <- sce.log[,c(sce.log$type == c & sce.log$timepoint == "On")]
+  
+  top.hgv <- getTopHVGs(pre.cell)
+  
+  pca <- fixedPCA(pre.cell, subset.row = top.hgv)
+  
+  umap <- scater::runUMAP(pca, dimred="PCA")
+  
+  umap_coords <- reducedDim(umap, "UMAP")
+  
+  umap_df <- data.frame(UMAP1 = umap_coords[,1], UMAP2 = umap_coords[,2], 
+                      Patient = colData(umap)$patient_id)
+  
+  plot <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Patient)) +
+    geom_point(size=2.5,alpha=0.8) +
+    theme_manuscript() +
+    labs(title = paste0(c," (On-treatment)"),
+       x = "UMAP 1", y = "UMAP 2", color = "Patient") 
+    #scale_color_manual(values = c("#F93943","#348AA7"))
+  
+  file <- file.path(paste0(dir.out, c, "umap.patient.on.pdf"))
+  pdf(file,width=10)
+  print(plot)
+  dev.off()
+}
+```
