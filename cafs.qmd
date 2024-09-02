@@ -1,0 +1,359 @@
+---
+title: "cafs"
+author: "Anh Nguyen Phuong"
+format: html
+editor: visual
+---
+
+# Enrichment of CAF Populations
+
+## Load Libraries
+
+```{r}
+#clear environment
+rm(list=ls())
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(ggpubr)
+library(edgeR)
+library(scuttle)
+library(biomaRt)
+library(singscore)
+library(ComplexHeatmap)
+library(reshape2)
+
+#load figures theme
+source("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/theme_manuscript.R")
+```
+
+## Load Data
+
+Directories:
+
+```{r}
+#input
+dir.in <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/cafs/input/"
+
+#output
+dir.out <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/cafs/output/"
+
+file.sig <- paste0(dir.in,"CAF_signature_short.csv")
+```
+
+```{r}
+#sce
+sce <- readRDS("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/tide/output/sce.tnbc.tide.RDS")
+
+#cafs signatures
+cafs <- read_csv(file.sig)
+```
+
+## Convert Mouse Gene Symbols to Human
+
+```{r}
+#function to convert mouse gene symbols to human ortologs
+convertMouseGeneList <- function(x){
+  require("biomaRt")
+  human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/") 
+  mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+  genesV2 <- getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", values = x , 
+                   mart = mouse, attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+  return(genesV2)
+}
+
+#columns with mouse symbols
+cols.mice <- c("Elyada_apCAFs", "Elyada_iCAFs", "Elyada_myCAFs", "Buechler_P_Col15a1", "Buechler_P_Pi16", "Buechler_P_Ccl19", "Buechler_P_Cxcl12", "Buechler_P_Npnt", "Buechler_P_Comp", "Buechler_P_Adamdec1", "Buechler_P_Hhip", "Buechler_P_Cxcl5", "Buechler_P_Lrrc15", "Friedman_sCAFs", "Friedman_pCAFs")
+
+#convert to human
+mice.to.human <- list()
+
+for (col in cols.mice) {
+  converted <- convertMouseGeneList(cafs[,col])
+  mice.to.human[[paste0(col)]] <- converted
+}
+
+#remove Deng signatures because they are derived from skin disease and not cancer
+cafs <- cafs[,-c(24:27)]
+
+#replace mouse genes with human orthologs and merge with the rest of signatures
+cafs.list <- as.list(cafs)
+
+for (col in cols.mice) {
+  cafs.list[[col]] <- mice.to.human[[col]]$HGNC.symbol
+}
+
+#remove nas
+for(i in 1:25) {
+  cafs.list[[i]] <- na.omit(cafs.list[[i]])
+}
+
+#make unique
+for(i in 1:25) {
+  cafs.list[[i]] <- unique(cafs.list[[i]])
+}
+```
+
+## Fibroblasts Population Enrichment
+
+### Pseudobulk
+
+```{r}
+#filter only fibroblasts
+fibro.pre <- sce[,c(sce$type == "Fibroblasts" & sce$timepoint == "Pre")]
+
+fibro.on <- sce[,c(sce$type == "Fibroblasts" & sce$timepoint == "On")]
+
+#pseudobulk per patient
+sum.pre <- aggregateAcrossCells(fibro.pre, 
+    id=fibro.pre$patient_id)
+
+sum.on <- aggregateAcrossCells(fibro.on, 
+    id=fibro.on$patient_id)
+```
+
+### Enrichment
+
+```{r}
+#ranking all genes
+stable.genes <- getStableGenes(10, type = 'carcinoma')
+
+ranked.pre <- rankGenes(assay(sum.pre),stableGenes=stable.genes)
+
+ranked.on <- rankGenes(assay(sum.on),stableGenes=stable.genes)
+```
+
+#### Pre-treatment
+
+```{r}
+#compute enrichment scores for each signature
+enrich.pre <- list()
+
+for (i in 1:25) {
+  enrich <- simpleScore(ranked.pre, upSet = cafs.list[[i]])
+  enrich.pre[[paste0(names(cafs.list)[[i]])]] <- enrich
+}
+
+#extract the first column of each df from the list and combine into one df
+scores.pre <- do.call(cbind, lapply(names(enrich.pre), function(name) {
+  col <- enrich.pre[[name]][, 1] #extract the first column
+  data.frame(col, row.names = NULL, stringsAsFactors = FALSE)
+}))
+
+colnames(scores.pre) <- names(enrich.pre)
+rownames(scores.pre) <- rownames(enrich.pre[[1]])
+
+#add 1 to all scores so that they are all positive
+scores.pre <- scores.pre + 1
+
+#add tide scores
+colda <- as.data.frame(colData(sce))
+colda <- colda[!duplicated(colda$patient_id), ]
+
+scores.pre <- merge(scores.pre, colda[,c("patient_id","TIDE","Dysfunction","Exclusion","TIDE.binary","Dysfunction.binary","Exclusion.binary")], by.x=0, by.y="patient_id")
+
+rownames(scores.pre) <- scores.pre$Row.names
+
+#plot heatmap
+
+#to center the white color at value 1
+breaks <- c(seq(0.6, 1, length.out = 50), seq(1, 1.4, length.out = 50))
+
+#reorder to match exclusion scores
+scores.pre <- scores.pre[order(scores.pre$Exclusion.binary, decreasing = T),]
+
+#annotation for heatmap
+annot <- as.data.frame(scores.pre[,"Exclusion.binary"])
+rownames(annot) <- rownames(scores.pre)
+colnames(annot) <- "Exclusion score"
+
+#annotation colors
+annot.col <- list(`Exclusion score` = c(high = "#F93943", low = "#348AA7"))
+
+hm.pre <- pheatmap(t(scores.pre[2:26]), 
+         heatmap_legend_param = list(title = "Enrichment score"), 
+         main = "Pre-treatment",
+         color = colorRampPalette(c("#348AA7","#9DDCE6","#C5E7F1", "ivory","#F1E095", "#FF9728","#F93943"))(100),
+         number_color="black",
+         cutree_rows = 2,
+         border_color = F,
+         legend_breaks = c(0.6, 0.8, 1, 1.2, 1.4),
+         breaks = breaks,
+         annotation_col = annot,
+         annotation_colors = annot.col,
+         cluster_cols = F,
+         gaps_col = 4,
+         show_colnames = F)
+
+pdf(file = paste0(dir.out,"pre.fibro.pdf"),height = 7)
+
+draw(hm.pre, 
+     heatmap_legend_side = "right",  #heatmap legend at the bottom
+     annotation_legend_side = "bottom",  #annotation legend at the bottom
+     merge_legend = TRUE,
+     annotation_legend_list = NULL) 
+
+dev.off()
+```
+
+#### On-treatment
+
+```{r}
+#compute enrichment scores for each signature
+enrich.on <- list()
+
+for (i in 1:25) {
+  enrich <- simpleScore(ranked.on, upSet = cafs.list[[i]])
+  enrich.on[[paste0(names(cafs.list)[[i]])]] <- enrich
+}
+
+#extract the first column of each df from the list and combine into one df
+scores.on <- do.call(cbind, lapply(names(enrich.on), function(name) {
+  col <- enrich.on[[name]][, 1] #extract the first column
+  data.frame(col, row.names = NULL, stringsAsFactors = FALSE)
+}))
+
+colnames(scores.on) <- names(enrich.on)
+rownames(scores.on) <- rownames(enrich.on[[1]])
+
+#add +1 to have all positive values
+scores.on <- scores.on + 1
+
+#add tide scores
+scores.on <- merge(scores.on, colda[,c("patient_id","TIDE","Dysfunction","Exclusion","TIDE.binary","Dysfunction.binary","Exclusion.binary")], by.x=0, by.y="patient_id")
+
+rownames(scores.on) <- scores.on$Row.names
+
+#reorder to match exclusion scores
+scores.on <- scores.on[order(scores.on$Exclusion.binary, decreasing = T),]
+
+hm.on <- pheatmap(t(scores.on[2:26]), 
+         heatmap_legend_param = list(title = "Enrichment score"), 
+         main = "On-treatment",
+         color = colorRampPalette(c("#348AA7","#9DDCE6","#C5E7F1", "ivory","#F1E095", "#FF9728","#F93943"))(100),
+         number_color="black",
+         cutree_rows = 2,
+         border_color = F,
+         legend_breaks = c(0.6, 0.8, 1, 1.2, 1.4),
+         breaks = breaks,
+         annotation_col = annot,
+         annotation_colors = annot.col,
+         cluster_cols = F,
+         gaps_col = 4,
+         show_colnames = F)
+
+#plot heatmap
+pdf(file = paste0(dir.out,"on.fibro.pdf"),height = 7)
+
+draw(hm.on, 
+     heatmap_legend_side = "right",  #heatmap legend at the bottom
+     annotation_legend_side = "bottom",  #annotation legend at the bottom
+     merge_legend = TRUE,
+     annotation_legend_list = NULL)
+
+dev.off()
+```
+
+### Delta Value
+
+```{r}
+#compute difference between scores on and pre (on-pre)
+delta <- scores.on[,c(2:26)] - scores.pre[,c(2:26)] 
+
+colnames(delta) <- names(scores.on[,c(2:26)])
+rownames(delta) <- scores.on$Row.names
+
+#add tide scores
+delta <- merge(delta, scores.on[,c("Row.names","TIDE","Dysfunction","Exclusion","TIDE.binary","Dysfunction.binary","Exclusion.binary")], by.x=0, by.y="Row.names")
+
+#melt
+melt.delta <- melt(delta,id.vars=c(c("Row.names","TIDE","Dysfunction","Exclusion","TIDE.binary","Dysfunction.binary","Exclusion.binary")))
+
+#mycafs populations
+mycafs <- c("Elyada_myCAFs","Buechler_P_Lrrc15","Kieffer_TGFB-myCAF","Kieffer_ecm-myCAF","Kieffer_wound-myCAF","Buechler_P_Cxcl5")
+
+#wilcox test between delta low and high exclusion
+p.delta <- numeric()
+median.low<- numeric()
+median.high<-numeric()
+
+for (s in mycafs){
+  
+  #value from low exclusion sample
+  low <-  melt.delta[melt.delta$variable == s & melt.delta$Exclusion.binary == "low",]$value
+  
+  #value from high exclusion sample
+  high <- melt.delta[melt.delta$variable == s & melt.delta$Exclusion.binary == "high",]$value
+  
+  #median low exclusion
+  ml <- median(low, na.rm = T)
+  
+  #median high exclusion
+  mh <- median(high, na.rm = T)
+  
+  #wilcox test
+  w <- wilcox.test(low,high)
+  
+  p.delta <- append(p.delta,w$p.value)
+  
+  median.low <- append(median.low, ml)
+  
+  median.high <- append(median.high, mh)
+}
+
+names(p.delta) <- mycafs
+p.delta <- data.frame(p.delta,median.low,median.high)
+
+#adjusted p values
+p.delta$p.adj <- p.adjust(p.delta$p.delta,method="fdr")
+
+#to add fdr to ggplot
+adjp.lab <- data.frame(
+  FDR = c("FDR = 0.28", "FDR = 0.08", "FDR = 0.08", "FDR = 0.26", "FDR = 0.11", "FDR = 0.10")
+)
+
+adjp.lab$variable <- mycafs
+
+#plot
+pdf(file = paste0(dir.out,"delta.pdf"),width=11,height = 10)
+
+ggplot(melt.delta[melt.delta$variable %in% mycafs,], aes(x = Exclusion.binary, y = value)) +
+  theme_manuscript() +
+  geom_boxplot(aes(fill=Exclusion.binary),show.legend = F,outliers = F) +
+  geom_jitter(width = 0.2,size=2) +
+  scale_fill_manual(values = c("#F93943","#348AA7")) +
+  facet_wrap(~variable) +
+  xlab("Exclusion score") +
+  ylab("Enrichment difference (on - pre)") +
+  geom_text(data = adjp.lab, mapping = aes(x = -Inf, y = -Inf, label = FDR), hjust = -0.6, vjust = -15, size = 8)
+
+dev.off()
+```
+
+```{r}
+#scatter plot
+scatter.data <- melt(scores.pre,id.vars=c(c("Row.names","TIDE","Dysfunction","Exclusion","TIDE.binary","Dysfunction.binary","Exclusion.binary")))
+
+names(scatter.data)[names(scatter.data) == 'value'] <- 'Pre'
+
+melt.on <- melt(scores.on,id.vars=c(c("Row.names","TIDE","Dysfunction","Exclusion","TIDE.binary","Dysfunction.binary","Exclusion.binary")))
+
+scatter.data$On <- melt.on$value
+
+#plot
+pdf(file = paste0(dir.out,"scat.split.pdf"),width=10)
+
+ggplot(scatter.data[scatter.data$variable == "Kieffer_TGFB-myCAF" | scatter.data$variable == "Buechler_P_Lrrc15",],aes(x=Pre,y=On)) +
+  theme_manuscript() +
+  geom_point(aes(color=Exclusion.binary),size=5) +
+  scale_color_manual(values = c("#F93943","#348AA7")) +
+  geom_abline(linetype = "dashed") +
+  facet_wrap(~variable) +
+  labs(x = "Pre-treatment enrichment",
+       y = "On-treatment enrichment",
+       color = "Exclusion score")
+
+dev.off()
+```
