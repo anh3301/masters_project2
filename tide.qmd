@@ -1,0 +1,242 @@
+---
+title: "tide"
+author: "Anh Nguyen Phuong"
+format: html
+editor: visual
+---
+
+# Preparing data for TIDE scoring and adding it to SCE
+
+## Load Libraries
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+library(SingleCellExperiment)
+library(Matrix)
+library(stringr)
+library(org.Hs.eg.db)
+library(scuttle)
+library(edgeR)
+library(tidyverse)
+
+#load figures theme
+source("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/theme_manuscript.R")
+```
+
+## Import Data and Code
+
+Directories:
+
+```{r}
+#inputs
+dir.in <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/tide/input/"
+
+#outputs
+dir.out <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/tide/output/"
+
+file.refgene <- paste0(dir.in,"Homo_sapiens.GRCh37.87.genelength.txt.gz")
+code.hugo <- paste0(dir.in,"update_hugo_symbols.R")
+```
+
+Files:
+
+```{r}
+#function to update hugo symbols
+source(code.hugo)
+
+#load the sce file
+sce <- readRDS("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/QC/output/sce_final.RDS")
+
+#load the reference genome
+length_genes_data <- read.delim(file.refgene)
+```
+
+## Normalisation
+
+### Filtering
+
+```{r}
+#subset to tnbc and only
+sce.tnbc <- sce[,sce$BC_type == "TNBC"]
+rm(sce)
+
+#subset to pre-treament only
+sce.tnbc <- sce.tnbc[,sce.tnbc$timepoint == "Pre"]
+
+#looking at the number of epithelial cells per patient
+epi.freq <- as.data.frame.matrix(table(sce.tnbc$patient_id,sce.tnbc$type))
+epi.freq <- epi.freq[,c("Epithelial","Basal")]
+
+#sample 8 only has 20 epithelial cells altogether so we will exclude it to obtain more accurate analysis
+sce.tnbc <- sce.tnbc[,sce.tnbc$patient_id != "BIOKEY_8"]
+rm(epi.freq)
+
+#update hugo symbols
+counts <- assay(sce.tnbc)
+counts <- update_HUGO(counts)
+rownames(sce.tnbc) <- rownames(counts)
+rm(counts)
+```
+
+### Sanity Check
+
+```{r}
+#obtaining gene lengths with symbols and emsembl for normalisation
+geneSymbols <- na.omit(data.frame('Symbol' = mapIds(org.Hs.eg.db, keys=length_genes_data$gene, column="SYMBOL", keytype="ENSEMBL", multiVals="first")))
+
+geneSymbols$ENSEMBL <- rownames(geneSymbols)
+
+length_genes <- merge(length_genes_data, geneSymbols, by.x = 'gene', by.y = 'ENSEMBL', )
+
+#sanity check 1
+sce_filter <- sce.tnbc[rownames(sce.tnbc) %in% length_genes$Symbol,] #remove genes not present in the gene length file
+length_genes <- length_genes[length_genes$Symbol %in% rownames(sce_filter),] #remove genes not present in the counts object
+
+#sanity check 2
+length_genes <- length_genes[match(rownames(sce_filter),length_genes$Symbol),] #reordering length genes to match sce order
+stopifnot(all(length_genes$Symbol == rownames(sce_filter))) #genes are matched
+```
+
+### Pseudobulk
+
+```{r}
+#computing pseudobulk per patient/sample
+sce_summed_patient <- aggregateAcrossCells(sce_filter, ids = sce_filter$patient_id)
+
+#make sure genes are not duplicated
+rownames(sce_summed_patient) <- make.unique(rownames(sce_summed_patient))
+
+#normalisation with gene length (FPKM = fragments per kilobase million)
+y <- DGEList(counts = assay(sce_summed_patient), genes = length_genes)
+keep <- filterByExpr(y, group = c(1:nrow(y$counts)))
+table(keep)
+y <- y[keep, ,keep.lib.sizes= FALSE]
+y <- calcNormFactors(y, method = "TMM")
+FPKM <- rpkm(y, normalized.lib.sizes = T, gene.length = "length")
+exp <- log2(FPKM + 1) #tide requires FPKM + 1
+
+#normalisation by subtracting the average gene expression value across all patients
+mean.geneexp <- apply(exp, 1, mean) #calculate mean per gene across all samples
+
+normalised.exp <- apply(exp, 2, function(x) x-mean.geneexp) #subtract from exp
+
+#save file
+write.table(normalised.exp, sep = "\t", file = paste0(dir.out,"tide.pseudo.pre.tsv"))
+```
+
+## Generate Final SCE
+
+This will be the final SCE file we use in all downstream analyses. It contains only TNBC patients with \>50 cancer cells. Also contains their TIDE scores and cell type annotations computed using metacells.
+
+### Filtering
+
+```{r}
+#load the sce file
+sce <- readRDS("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/QC/output/sce_final.RDS")
+
+#subset to tnbc while keeping both pre and on-treatment
+sce.tnbc.all <- sce[,sce$BC_type == "TNBC"]
+rm(sce)
+table(sce.tnbc.all$BC_type, sce.tnbc.all$timepoint)
+
+#remove sample 8, which has very little epithelial cells
+sce.tnbc.all <- sce.tnbc.all[,sce.tnbc.all$patient_id != "BIOKEY_8"]
+table(sce.tnbc.all$patient_id)
+
+#update hugo symbols
+counts.hugo <- assay(sce.tnbc.all)
+counts.hugo <- update_HUGO(counts.hugo)
+rownames(sce.tnbc.all) <- rownames(counts.hugo)
+```
+
+### TIDE Scores
+
+```{r}
+#read tide score file
+file.tide <- paste0(dir.in,"tide.pre.csv")
+tide <- read.csv(file.tide)
+```
+
+#### TIDE Score
+
+```{r}
+min(tide$TIDE) #-1.32
+max(tide$TIDE) #2.8
+median(-1.32:2.8) #threshold for low and high will be equal to median between max and min (i.e. 0.68) since they are z score values
+
+ggplot(tide, aes(x=Patient,y=TIDE)) +
+  geom_point() +
+  geom_hline(yintercept = 0.68)
+```
+
+#### Dysfunction Score
+
+```{r}
+min(tide$Dysfunction) #-1.95
+max(tide$Dysfunction) #1.35
+median(-1.95:1.35) #threshold for low and high will be equal to median between max and min (i.e. -0.45) since they are z score values
+
+pdf(paste0(dir.out,"dys.pdf"),width = 9)
+
+ggplot(tide, aes(x=reorder(Patient, Dysfunction),y=Dysfunction)) +
+  theme_manuscript() +
+  geom_point(size=3) +
+  geom_hline(yintercept = -0.45, color = "red", size = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  ylab("Dysfunction score") +
+  xlab("Patient")
+
+dev.off()
+```
+
+#### Exclusion Score
+
+```{r}
+min(tide$Exclusion) #-4.08
+max(tide$Exclusion) #2.8
+median(-4.08:2.8) #threshold = -1.08
+
+pdf(paste0(dir.out,"ex.pdf"),width = 9)
+
+ggplot(tide, aes(x=reorder(Patient, Exclusion),y=Exclusion)) +
+  theme_manuscript() +
+  geom_point(size=3) +
+  geom_hline(yintercept = -1.08, color = "red", size = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  ylab("Exclusion score") +
+  xlab("Patient")
+
+dev.off()
+```
+
+### Add Scores to SCE
+
+```{r}
+#df with tide, dysfunction, and exclusion scores per patient
+dys.ex <- tide[,c(1,4,11,12)]
+
+#samples 11, 15, 16, 19 have low dysfunction while the rest seem to have high dysfunction (based on the median)
+dys.ex$TIDE.binary <- "high"
+dys.ex$TIDE.binary[dys.ex$TIDE < 0.68] <- "low"
+
+#samples 9, 26, and 31 have low dysfunction while the rest seem to have high dysfunction (based on the median)
+dys.ex$Dysfunction.binary <- "high"
+dys.ex$Dysfunction.binary[dys.ex$Dysfunction < -0.45] <- "low"
+
+#samples 1, 11, 15, 16 have low dysfunction while the rest seem to have high dysfunction (based on the median)
+dys.ex$Exclusion.binary <- "high"
+dys.ex$Exclusion.binary[dys.ex$Exclusion < -1.08] <- "low"
+
+#merging tide classifications with the sce
+colda <- colData(sce.tnbc.all)
+colda$patient_id <- as.character(colda$patient_id)
+colda <- merge(colda, dys.ex, by.x = "patient_id", by.y = "Patient",all = TRUE, sort = FALSE)
+colData(sce.tnbc.all) <- colda
+rm(colda)
+
+#save final sce
+saveRDS(sce.tnbc.all, paste0(dir.out,"sce.tnbc.tide.RDS"))
+```
