@@ -1,0 +1,457 @@
+---
+title: "de.dysfunction"
+author: "Anh Nguyen Phuong"
+format: html
+editor: visual
+---
+
+# Differential Gene Expression
+
+## Load Libraries
+
+```{r}
+#clear environment
+rm(list=ls())
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(ggpubr)
+library(edgeR)
+library(scuttle)
+library(rbioapi)
+library(enrichR)
+library(scran)
+library(ggtext)
+
+#load figures theme
+source("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/theme_manuscript.R")
+```
+
+## Load Data
+
+Directories:
+
+```{r}
+#output
+dir.out <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/dif.expr/output/"
+```
+
+Files:
+
+```{r}
+#sce
+sce <- readRDS("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/tide/output/sce.tnbc.tide.RDS")
+```
+
+## Differential Expression
+
+```{r}
+#merge epithelial and basal
+colda <- colData(sce)
+
+colda$type[colda$type == "Epithelial" | colda$type == "Basal"] <- "Cancer cells"
+
+colData(sce) <- colda
+
+rm(colda)
+```
+
+```{r}
+#pseudobulk - cell type per patient in pre- and on-treatment
+sum.pre <- aggregateAcrossCells(sce[,sce$timepoint == "Pre"],
+                                   id=colData(sce[,sce$timepoint == "Pre"])[,c("patient_id","type")])
+
+sum.on <- aggregateAcrossCells(sce[,sce$timepoint == "On"],
+                                   id=colData(sce[,sce$timepoint == "On"])[,c("patient_id","type")])
+
+#filter out profiles with less than 10 cells
+sum.pre <- sum.pre[,sum.pre$ncells >= 10]
+sum.on <- sum.on[,sum.on$ncells >= 10]
+```
+
+### Dysfunction
+
+#### Pre-treatment
+
+```{r}
+#differential expression in each cell type by dysfunction score
+de.dys.pre <- pseudoBulkDGE(sum.pre, 
+    label=sum.pre$type,
+    design=~Dysfunction,
+    coef="Dysfunction",
+    condition=sum.pre$Dysfunction
+)
+
+#how many genes are more expressed in higher/lower dysfunction?
+is.de.dys.pre <- decideTestsPerLabel(de.dys.pre, threshold=0.1)
+
+summarizeTestsPerLabel(is.de.dys.pre)
+```
+
+##### Cancer Cells
+
+```{r}
+#significantly differentially expresssed genes in cancer cells
+epi.dys.pre <- as.data.frame(de.dys.pre[["Cancer cells"]])
+
+epi.dys.pre <- na.omit(epi.dys.pre)
+
+epi.dys.pre <- epi.dys.pre[epi.dys.pre$FDR<0.1,]
+```
+
+GO enrichment - higher dysfunction:
+
+```{r}
+#go terms enriched in higher dysfunction cancer cells
+websiteLive <- getOption("enrichR.live")
+
+if (websiteLive) {
+    listEnrichrSites()
+    setEnrichrSite("Enrichr") #human genes   
+}
+
+if (websiteLive) dbs <- "GO_Biological_Process_2023"
+
+if (websiteLive) {
+    epi.dys.pre.enri <- enrichr(rownames(epi.dys.pre[epi.dys.pre$logFC>0,]), dbs)
+}
+
+#df to plot
+epi.dys.pre.go <- as.data.frame(epi.dys.pre.enri[[1]])
+
+epi.dys.pre.go <- epi.dys.pre.go %>%
+  separate(Overlap, c("Gene_overlap", "GO_genes"), "/")
+
+#remove the go identification to save space in figure
+epi.dys.pre.go$Term <- gsub("\\s+\\S+$", "", epi.dys.pre.go$Term)
+
+#plot
+pdf(file = paste0(dir.out,"go.epi.hdys.pre.pdf"),width = 15, height = 10)
+
+ggplot(epi.dys.pre.go[c(1:20),], aes(x=reorder(Term, -Adjusted.P.value), y = as.numeric(Gene_overlap))) +
+  theme_manuscript() +
+  geom_bar(stat = "identity", aes(fill = Adjusted.P.value)) +
+  scale_fill_gradientn(colours = c('#125E8A','#CBE9FA'),
+                       limits = c(0.001,0.1),
+                       breaks = c(0.001,0.05,0.1),
+                       labels = c('0.001','0.05','0.1')) +
+  coord_flip() +
+  ylab("Gene count") +
+  xlab("Enriched term") +
+  ggtitle("Cancer cells (Pre-treatment)") +
+  theme(legend.position='right', legend.direction='vertical') +
+  labs(fill = "FDR")
+
+dev.off()
+```
+
+Tumour immune evasion genes - higher dysfunction:
+
+```{r}
+epi.dys.pre$genes <- rownames(epi.dys.pre)
+
+#example genes associates with tumour immune evasion upregulated in higher dysfunction
+dys.genes <- c("CD70","CD84","MAL","SERPINB9","CD38","PDCD1LG2","LGALS9")
+
+#italicise gene symbols
+dys.genes.ital <- lapply(
+  dys.genes,
+  function(x) bquote(italic(.(x))))
+
+pdf(file = paste0(dir.out,"de.epi.hdys.pre.pdf"),width = 8)
+
+ggplot(epi.dys.pre[dys.genes,], aes(x=reorder(genes, -logFC), y = as.numeric(logFC))) +
+  theme_manuscript() +
+  geom_bar(stat = "identity", aes(fill = FDR)) +
+  scale_fill_gradientn(colours = c('#125E8A','#CBE9FA'),
+                       limits = c(0.001,0.1),
+                       breaks = c(0.001,0.05,0.1),
+                       labels = c('0.001','0.05','0.1')) +
+  coord_flip() +
+  ylab("logFC") +
+  xlab("") +
+  ggtitle("Cancer cells (Pre-treatment)") +
+  theme(legend.position='right', legend.direction='vertical') +
+  labs(fill = "FDR") +
+  scale_x_discrete(labels = dys.genes.ital)
+
+dev.off()
+```
+
+#### On-treatment
+
+```{r}
+#differential expresison analysis per cell type
+de.dys.on <- pseudoBulkDGE(sum.on, 
+    label=sum.on$type,
+    design=~Dysfunction,
+    coef="Dysfunction",
+    condition=sum.on$Dysfunction
+)
+
+is.de.dys.on <- decideTestsPerLabel(de.dys.on, threshold=0.1)
+summarizeTestsPerLabel(is.de.dys.on)
+```
+
+#### Summary
+
+```{r}
+#number of differentially expressed genes pre-treatment in cancer cells, cd4+, and cd8+ t cells
+de.dys.pre.go <- as.data.frame(summarizeTestsPerLabel(is.de.dys.pre))
+de.dys.pre.go$DE <- as.numeric(de.dys.pre.go[,1]) + as.numeric(de.dys.pre.go[,3])
+de.dys.pre.go$Cell <- rownames(de.dys.pre.go)
+de.dys.pre.go <- de.dys.pre.go[c(2:4),c(5,6)]
+de.dys.pre.go$Treatment <- "Pre-treatment"
+
+#number of differentially expressed genes on-treatment in cancer cells, cd4+, and cd8+ t cells
+de.dys.on.go <- as.data.frame(summarizeTestsPerLabel(is.de.dys.on))
+de.dys.on.go$DE <- as.numeric(de.dys.on.go[,1]) + as.numeric(de.dys.on.go[,3])
+de.dys.on.go$Cell <- rownames(de.dys.on.go)
+de.dys.on.go <- de.dys.on.go[c(2:4),c(5,6)]
+de.dys.on.go$Treatment <- "On-treatment"
+
+de.dys.go <- rbind(de.dys.pre.go,de.dys.on.go)
+
+#reorder treatment
+de.dys.go$Treatment <- factor(de.dys.go$Treatment, levels=c("Pre-treatment", "On-treatment"))
+
+#plot
+pdf(file=paste0(dir.out,"nde.dys.pdf"),width = 8)
+
+ggplot(de.dys.go,aes(x=Cell,y=DE)) +
+  theme_manuscript() +
+  geom_bar(stat="identity",aes(fill=Cell),show.legend = F) +
+  scale_fill_manual(values = c("#FE4A49","#2AB7CA","#FED766")) +
+  scale_x_discrete(labels = c("Cancer cells", "CD4+ T cells", "CD8+ T cells")) +
+  facet_wrap(~Treatment) +
+  xlab("") +
+  ylab("Number of genes") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+dev.off()
+```
+
+### Exclusion
+
+#### Pre-treatment
+
+```{r}
+#differential expression analysis as in dysfunction
+de.ex.pre <- pseudoBulkDGE(sum.pre, 
+    label=sum.pre$type,
+    design=~Exclusion,
+    coef="Exclusion",
+    condition=sum.pre$Exclusion
+)
+
+is.de.ex.pre <- decideTestsPerLabel(de.ex.pre, threshold=0.1)
+summarizeTestsPerLabel(is.de.ex.pre)
+```
+
+##### Cancer Cells
+
+```{r}
+#significantly differentially expressed genes in cacner cells
+epi.ex.pre <- as.data.frame(de.ex.pre[["Cancer cells"]])
+epi.ex.pre <- na.omit(epi.ex.pre)
+epi.ex.pre <- epi.ex.pre[epi.ex.pre$FDR<0.1,]
+```
+
+GO enrichment - lower exclusion:
+
+```{r}
+if (websiteLive) {
+    epi.ex.pre.enri <- enrichr(rownames(epi.ex.pre[epi.ex.pre$logFC<0,]), dbs)
+}
+
+#df to plot
+epi.ex.pre.go <- as.data.frame(epi.ex.pre.enri[[1]])
+
+epi.ex.pre.go <- epi.ex.pre.go %>%
+  separate(Overlap, c("Gene_overlap", "GO_genes"), "/")
+
+epi.ex.pre.go$Term <- gsub("\\s+\\S+$", "", epi.ex.pre.go$Term)
+
+
+pdf(file = paste0(dir.out,"go.epi.lex.pre.pdf"),width = 12, height = 10)
+
+ggplot(epi.ex.pre.go[c(1:15),], aes(x=reorder(Term, -Adjusted.P.value), y = as.numeric(Gene_overlap))) +
+  theme_manuscript() +
+  geom_bar(stat = "identity", aes(fill = Adjusted.P.value)) +
+  scale_fill_gradientn(colours = c('#125E8A','#CBE9FA'),
+                       limits = c(0.001,0.1),
+                       breaks = c(0.001,0.05,0.1),
+                       labels = c('0.001','0.05','0.1')) +
+  coord_flip() +
+  ylab("Gene count") +
+  xlab("Enriched term") +
+  ggtitle("Cancer cells (Pre-treatment)") +
+  theme(legend.position='right', legend.direction='vertical') +
+  labs(fill = "FDR")
+
+dev.off()
+```
+
+T cell proliferation/activation/differentiation genes - lower exclusion:
+
+```{r}
+epi.ex.pre$genes <- rownames(epi.ex.pre)
+
+#example genes associated with t cell proliferation/activation/differentiation
+epi.ex.genes <- c("IL15","VCAM1","IL23A","CXCL13")
+
+#italicise gene symbols
+epi.ex.genes.ital <- lapply(
+  epi.ex.genes,
+  function(x) bquote(italic(.(x))))
+
+pdf(file = paste0(dir.out,"de.epi.lex.pre.pdf"),width = 8)
+
+ggplot(epi.ex.pre[epi.ex.genes,], aes(x=reorder(genes, -logFC), y = as.numeric(logFC))) +
+  theme_manuscript() +
+  geom_bar(stat = "identity", aes(fill = FDR)) +
+  scale_fill_gradientn(colours = c('#125E8A','#CBE9FA'),
+                       limits = c(0.001,0.1),
+                       breaks = c(0.001,0.05,0.1),
+                       labels = c('0.001','0.05','0.1')) +
+  coord_flip() +
+  ylab("logFC") +
+  xlab("") +
+  ggtitle("Cancer cells (Pre-treatment)") +
+  theme(legend.position='right', legend.direction='vertical') +
+  labs(fill = "FDR") +
+  scale_x_discrete(position = "top", labels = epi.ex.genes.ital)
+
+dev.off()
+```
+
+##### CD8+ T Cells
+
+```{r}
+#significantly differentially expressed genes in cd8+ t cells
+ct.ex.pre <- as.data.frame(de.ex.pre[["CD8+ T cells"]])
+ct.ex.pre <- na.omit(ct.ex.pre)
+ct.ex.pre <- ct.ex.pre[ct.ex.pre$FDR<0.1,]
+```
+
+GO enrichment - lower exclusion:
+
+```{r}
+if (websiteLive) {
+    ct.ex.pre.enri <- enrichr(rownames(ct.ex.pre[ct.ex.pre$logFC<0,]), dbs)
+}
+
+#df to plot
+ct.ex.pre.go <- as.data.frame(ct.ex.pre.enri[[1]])
+
+ct.ex.pre.go <- ct.ex.pre.go %>%
+  separate(Overlap, c("Gene_overlap", "GO_genes"), "/")
+
+ct.ex.pre.go$Term <- gsub("\\s+\\S+$", "", ct.ex.pre.go$Term)
+
+#plot
+pdf(file = paste0(dir.out,"go.ct.lex.pre.pdf"),width = 15, height = 11)
+
+ggplot(ct.ex.pre.go[c(1:15),], aes(x=reorder(Term, -Adjusted.P.value), y = as.numeric(Gene_overlap))) +
+  theme_manuscript() +
+  geom_bar(stat = "identity", aes(fill = Adjusted.P.value)) +
+  scale_fill_gradientn(colours = c('#125E8A','#CBE9FA'),
+                       limits = c(0.001,0.1),
+                       breaks = c(0.001,0.05,0.1),
+                       labels = c('0.001','0.05','0.1')) +
+  coord_flip() +
+  ylab("Gene count") +
+  xlab("Enriched term") +
+  ggtitle("CD8+ T cells (Pre-treatment)") +
+  theme(legend.position='right', legend.direction='vertical') +
+  labs(fill = "FDR")
+
+dev.off()
+```
+
+T cell proliferation genes - lower exclusion:
+
+```{r}
+ct.ex.pre$genes <- rownames(ct.ex.pre)
+
+#example proliferation associated genes
+ct.ex.genes <- c("NDC80","ZWINT","KIF14","CDCA5","CEP55","SPC25","SPC24","SGO1")
+
+#italicise gene symbols
+ct.ex.genes.ital <- lapply(
+  ct.ex.genes,
+  function(x) bquote(italic(.(x))))
+
+pdf(file = paste0(dir.out,"de.ct.lex.pre.pdf"),width = 8)
+
+ggplot(ct.ex.pre[ct.ex.genes,], aes(x=reorder(genes, -logFC), y = as.numeric(logFC))) +
+  theme_manuscript() +
+  geom_bar(stat = "identity", aes(fill = FDR)) +
+  scale_fill_gradientn(colours = c('#125E8A','#CBE9FA'),
+                       limits = c(0.0001,0.1),
+                       breaks = c(0.0001,0.05,0.1),
+                       labels = c('0.0001','0.05','0.1')) +
+  coord_flip() +
+  ylab("logFC") +
+  xlab("") +
+  ggtitle("CD8+ T cells (Pre-treatment)") +
+  theme(legend.position='right', legend.direction='vertical') +
+  labs(fill = "FDR") +
+  scale_x_discrete(position = "top", labels = ct.ex.genes.ital)
+
+dev.off()
+```
+
+#### On-treatment
+
+```{r}
+#differential expression analysis
+de.ex.on <- pseudoBulkDGE(sum.on, 
+    label=sum.on$type,
+    design=~Exclusion,
+    coef="Exclusion",
+    condition=sum.on$Exclusion
+)
+
+is.de.ex.on <- decideTestsPerLabel(de.ex.on, threshold=0.1)
+summarizeTestsPerLabel(is.de.ex.on)
+```
+
+#### Summary
+
+```{r}
+#number of de genes pre-treatment in cancer cells, cd8+ t cells, and fibro
+de.ex.pre.go <- as.data.frame(summarizeTestsPerLabel(is.de.ex.pre))
+de.ex.pre.go$DE <- as.numeric(de.ex.pre.go[,1]) + as.numeric(de.ex.pre.go[,3])
+de.ex.pre.go$Cell <- rownames(de.ex.pre.go)
+de.ex.pre.go <- de.ex.pre.go[c(2,4,6),c(5,6)]
+de.ex.pre.go$Treatment <- "Pre-treatment"
+
+#number of de genes on-treatment in cancer cells, cd8+ t cells, and fibro
+de.ex.on.go <- as.data.frame(summarizeTestsPerLabel(is.de.ex.on))
+de.ex.on.go$DE <- as.numeric(de.ex.on.go[,1]) + as.numeric(de.ex.on.go[,3])
+de.ex.on.go$Cell <- rownames(de.ex.on.go)
+de.ex.on.go <- de.ex.on.go[c(2,4,6),c(5,6)]
+de.ex.on.go$Treatment <- "On-treatment"
+
+de.ex.go <- rbind(de.ex.pre.go,de.ex.on.go)
+
+#reorder treatment
+de.ex.go$Treatment <- factor(de.ex.go$Treatment, levels=c("Pre-treatment", "On-treatment"))
+
+pdf(file=paste0(dir.out,"nde.ex.pdf"),width = 6)
+
+ggplot(de.ex.go,aes(x=Cell,y=DE)) +
+  theme_manuscript() +
+  geom_bar(stat="identity",aes(fill=Cell),show.legend = F) +
+  scale_fill_manual(values = c("#FE4A49","#2AB7CA","#FED766")) +
+  scale_x_discrete(labels = c("Cancer cells", "CD8+ T cells", "Fibroblasts")) +
+  facet_wrap(~Treatment) +
+  xlab("") +
+  ylab("Number of genes") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+dev.off()
+```
