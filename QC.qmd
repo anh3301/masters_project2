@@ -1,0 +1,481 @@
+---
+title: "Bassez et al. scRNA QC and annotation with iterative metacells pipeline"
+format: html
+editor: visual
+---
+
+## Introduction
+
+The goal of this script is to load the data and do some preliminary QC. Then, the SCE object will be transformed into an Anndata object to continue the analysis in Python with the metacells iterative pipeline.
+
+## Load Libraries
+
+```{r}
+rm(list=ls())
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scDblFinder)
+library(scater)
+library(Matrix)
+library(singleCellTK)
+library(caret)
+library(anndata)
+library(MCView)
+library(reticulate)
+library(pheatmap)
+
+#load figures theme
+source("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/theme_manuscript.R")
+```
+
+## Load Data and Construct SCE
+
+Directories:
+
+```{r}
+dir.in <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/QC/input/"
+
+file.counts <- paste0(dir.in,"1863-counts_cells_cohort1.rds")
+
+file.meta <- paste0(dir.in,"1872-BIOKEY_metaData_cohort1_web.csv")
+```
+
+Load files:
+
+```{r}
+raw.counts <- readRDS(file.counts)
+
+metadata <- read.csv(file.meta)
+```
+
+Construct SCE object:
+
+```{r}
+sce <- SingleCellExperiment(list(counts=raw.counts),
+                            colData = metadata,
+                            rowData = rownames(raw.counts))
+
+rm(raw.counts) #to clear up space
+```
+
+## Quality Control
+
+About this dataset:
+
+There is no ERCC spike-in that can be used to normalise by. This data was previously filtered: "All cells expressing \<200 or \>6,000 genes were removed, as well as cells that contained \<400 unique molecular identifiers (UMIs) and \>15% mitochondrial counts." Therefore, we don't expect to filter too many cells in this QC.
+
+About this QC:
+
+This QC is based on adaptive thresholds which are calculated using the quickPerCellQC function. The quickPerCellQC function is a wrapper for the isOutlier function, which detects cells as outliers if they are more than 'n' MAD from the median (nmads = 3, discards \~= 1% of cells, nmads = 2, discards \~= 5%). However, this is based on the assumption that the majority of the cells are good quality cells. If most of the cells in a sample are poor quality, this will render the QC useless, as the median and MAD would be inflated within those batches. In these cases, it is better to decide on a fixed threshold.
+
+Things that should be taken into consideration include the fact that different cell types may have different amount of RNA or higher proportions of mitochondrial genes. Such cells are more likely to be considered outliers. This is mitigated with the use of MADs as highly heterogenous populations will increase the MAD and reduce the change of incorrectly removing particular cell types.
+
+We are using an adaptive threshold for all the samples at the same time. This adaptive approach only works when there is no batch effect. If there is signficant batch effects, QC should be done for each batch (batch variable can be added in the PerCellQC) as the batch effect will inflate the MAD and median, rendering the adaptive QC useless.
+
+### Mitochondrial Genes
+
+```{r}
+#general visualisation of the data - distribution of counts per patient
+ggplot(data = metadata, aes(x = patient_id, y = nCount_RNA)) + geom_violin()
+
+#obtain mitochondrial gene names
+MT_names <- grep("^MT-",rownames(sce),value = T) 
+
+#which genes from sce are mitochondrial?
+is_mito <- rownames(sce) %in% MT_names #13 genes are mitochondrial
+
+#adds common QC measures to the coldata
+sce <- addPerCellQC(sce, subsets = list(Mt = is_mito)) 
+
+#removing cells with high mitochondrial genes representation (stress)
+qc <- perCellQCFilters(colData(sce),  #defines adaptive threshold for QC measures
+                     sub.fields= c("subsets_Mt_percent"),
+                     nmads = 3) #remove outliers
+
+#no cells removed - expected since it has been QCed by authors
+colSums(as.matrix(qc))
+
+sce$discard <- qc$discard #no outliers detected
+
+#QC visualisation
+plotColData(sce, x="patient_id", y="subsets_Mt_percent", colour_by="discard")
+plotColData(sce, x="patient_id", y="detected", colour_by="discard")
+plotColData(sce, x="patient_id", y="sum", colour_by="discard")
+
+sce.filtered <- sce[,!sce$discard] #apply QC discard to the cells (no cells discarded)
+
+rm(sce)
+```
+
+### Double-check author's QC
+
+```{r}
+#sce metadata
+colda <- as.data.frame(colData(sce.filtered))
+
+#plot mitochondial gene %
+pdf(paste0(dir.out,"mit.per.pdf"),width=9)
+
+ggplot(colda,aes(x=subsets_Mt_percent)) +
+  theme_manuscript() +
+  geom_density() +
+  xlab("Mitochondrial gene percentage") +
+  ylab("Density") +
+  geom_vline(xintercept=15,color="red",size=1)
+
+dev.off()
+```
+
+```{r}
+#plot number of genes expressed
+pdf(paste0(dir.out,"nrna.pdf"),width=9)
+
+ggplot(colda,aes(x=nFeature_RNA)) +
+  theme_manuscript() +
+  geom_density() +
+  xlab("Number of expressed genes") +
+  ylab("Density") +
+  geom_vline(xintercept=c(200,6000),color="red",size=1)
+
+dev.off()
+```
+
+```{r}
+#plot number of genes expressed
+pdf(paste0(dir.out,"numi.pdf"),width=17)
+
+ggplot(colda,aes(x=nCount_RNA)) +
+  theme_manuscript() +
+  geom_density() +
+  xlab("Number of UMIs") +
+  ylab("Density") +
+  geom_vline(xintercept=400,color="red",size=1)
+
+dev.off()
+```
+
+### Doublet Detection
+
+The scDblFinder() function (Germain et al. 2021) combines the simulated doublet density with an iterative classification scheme. For each observed cell, an initial score is computed by combining the fraction of simulated doublets in its neighborhood with another score based on co-expression of mutually exclusive gene pairs (Bais and Kostka 2020). A threshold is chosen that best distinguishes between the real and simulated cells, allowing us to obtain putative doublet calls among the real cells.
+
+```{r}
+#it takes a while but its quite efficient in comparison with other methods
+sce.doublet <- scDblFinder(sce.filtered, samples="patient_id") 
+
+table(sce.doublet$scDblFinder.class) #8% of cells classified as doublets
+
+#remove detected doublets
+sce.doublet <- sce.doublet[,sce.doublet$scDblFinder.class == "singlet"] 
+
+rm(sce.filtered)
+
+#save file
+dir.out <- "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Project2/QC/output/"
+
+saveRDS(sce.doublet, paste0(dir.out,"sce.doublet.qced.RDS"))
+```
+
+## Convert SCE to Anndata
+
+The SCE object has to be deconstructed to then be reconstructed into an Anndata object in Python to work with the Metacells2 pipeline.
+
+```{r}
+#raw counts
+counts <- counts(sce.doublet)
+
+writeMM(counts, paste0(dir.out,"count_qc.mtx"))
+
+#barcodes
+barcodes <- data.frame(colnames(sce.doublet))
+
+colnames(barcodes)<- 'Barcode'
+
+write.csv(barcodes, paste0(dir.out,"barcode_name.csv"),quote = FALSE,row.names = FALSE)
+
+#gene names
+genes <- data.frame(rownames(sce.doublet))
+
+colnames(genes) <- 'Gene'
+
+write.csv(genes, paste0(dir.out,"gene_name.csv"),quote = FALSE,row.names = FALSE)
+
+#metadata
+cellMeta <- colData(sce.doublet)
+
+write.csv(cellMeta, paste0(dir.out,"cellMeta.csv"),quote = FALSE,row.names = TRUE)
+```
+
+## Metacells Annotation
+
+This can theoretically be run directly in Python using reticulate, but the ICR cluster has some problems with the use of R and the MCView package. Therefore, we download the metacells into R and run the MCView from here.
+
+### Iteration 1
+
+```{r}
+use_python("/Users/aphuong/Library/r-miniconda/bin/python")
+
+#check data
+adata <- read_h5ad(paste0(dir.in,"Bassez-it1.metacells.h5ad"))
+
+#run mcview
+MCView::import_dataset(project = "Bassez_it1",
+               dataset = "Bassez_it1",
+               anndata_file = "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Bassez_scRNA/Code/qc_annotations/input/Bassez-it1.metacells.h5ad",
+               metadata_fields = "all",
+               title = "Bassez_it1")
+
+run_app("Bassez_it1")
+```
+
+### Iteration 2
+
+```{r}
+use_python("/Users/aphuong/Library/r-miniconda/bin/python")
+
+#check data
+adata <- read_h5ad("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Bassez_scRNA/Code/qc_annotations/input/Bassez-it2.metacells.h5ad")
+
+#run mcview
+MCView::import_dataset(project = "Bassez_it2",
+               dataset = "Bassez_it2",
+               anndata_file = "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Bassez_scRNA/Code/qc_annotations/input/Bassez-it2.metacells.h5ad",
+               metadata_fields = "all",
+               title = "Bassez_it2")
+
+run_app("Bassez_it2")
+```
+
+### Iteration 3
+
+```{r}
+use_python("/Users/aphuong/Library/r-miniconda/bin/python")
+
+#check data
+adata <- read_h5ad("~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Bassez_scRNA/Code/qc_annotations/input/Bassez-it3.metacells.h5ad")
+
+#run mcview
+MCView::import_dataset(project = "Bassez_it3",
+               dataset = "Bassez_it3",
+               anndata_file = "~/Library/CloudStorage/OneDrive-SharedLibraries-TheInstituteofCancerResearch/Stephen-John Sammut - IMC-networks/Bassez_scRNA/Code/qc_annotations/input/Bassez-it3.metacells.h5ad",
+               metadata_fields = "all",
+               title = "Bassez_it3")
+
+run_app("Bassez_it3")
+```
+
+## Construct Final SCE object
+
+We download the final Anndata files after QC and metacells iteration from Python and construct the final SCE object.
+
+```{r}
+rawcounts <- readMM(paste0(dir.in,'Bassez-final.counts.mtx'))
+
+#check that rawcounts is dgCMatrix and not dgTMatrix (both sparse, but dgCMatrix is the standard and it is more compressed)
+counts <- as(rawcounts, "CsparseMatrix")
+
+cellMeta <- read.csv(paste0(dir.in,'Bassez-final.cellMeta.csv'))
+
+geneMeta <- read.csv(paste0(dir.in,'Bassez-final.geneMeta.csv'))
+
+sce_final <- SingleCellExperiment(list(counts = t(counts)),colData = cellMeta)
+
+colnames(sce_final) <- cellMeta$Cell
+rownames(sce_final) <- geneMeta$GeneName
+rowData(sce_final) <- geneMeta
+rm(counts)
+
+#remove outliers
+sce_final <- sce_final[,sce_final$type != "Outliers"]
+
+#save file
+saveRDS(sce_final, paste0(dir.out,"sce_final.RDS"))
+```
+
+## Comparison with Bassez Cell Type Annotations
+
+```{r}
+annotations <- as.data.frame(colData(sce_final)[,c("Cell","cellType","type")])
+
+#compare our annotations with bassez annotations
+table(annotations$cellType,annotations$type)
+
+#to match the naming of bassez annotations
+annotations$type.match <- annotations$type #bassez annotations
+
+annotations$type.match[annotations$type.match == "CD8+ T cells" | annotations$type.match == "CD4+ T cells"] <- "T_cell"
+
+annotations$type.match[annotations$type.match == "Macrophages/Monocytes"] <- "Myeloid_cell"
+
+annotations$type.match[annotations$type.match == "Fibroblasts"] <- "Fibroblast"
+
+annotations$type.match[annotations$type.match == "Endothelial"] <- "Endothelial_cell"
+
+annotations$type.match[annotations$type.match == "B cells" | annotations$type.match == "Plasma cells"] <- "B_cell"
+
+annotations$type.match[annotations$type.match == "Basal" | annotations$type.match == "Epithelial"] <- "Cancer_cell"
+
+annotations$type.match[annotations$type.match == "Mast cells"] <- "Mast_cell"
+
+#check if all annotations match
+table(annotations$cellType,annotations$type.match)
+
+#convert to factors for confusion matrix
+annotations$type.match <- as.factor(annotations$type.match)
+annotations$cellType <- as.factor(annotations$cellType)
+
+#compute confusion matrix
+cm <- confusionMatrix(data = annotations$type.match, reference = annotations$cellType)
+cm.table <- as.data.frame(cm$table)
+
+#plot confusion matrix
+pdf(file = paste0(dir.out,"cm.pdf"),width = 11, height = 8.5)
+
+ggplot(cm.table, aes(x=Reference, y=Prediction, fill=Freq)) + 
+  theme_manuscript() +
+  geom_tile(color = 'grey60') +
+  geom_text(aes(label=Freq), color="black", size = 7, fontface = "bold") +
+  xlab(bquote("Reference from Bassez" ~italic("et al."))) +
+  ylab("Re-annotation") +
+  scale_fill_gradientn(colours = c('white','azure','lightcyan','lightskyblue1','lightblue','lightskyblue3','skyblue4'),
+                       limits = c(0,50150),
+                       breaks = c(0,10000,20000,30000,40000,50000),
+                       labels = c('0','10000','20000','30000','40000','50000')) +
+  theme(legend.position='right', legend.direction='vertical') +
+  scale_x_discrete(labels=c('B cell','Cancer cell','Endothelial cell','Fibroblast','Mast cell','Myeloid cell','pDC','T cell')) +
+  scale_y_discrete(labels=c('B cell','Cancer cell','Endothelial cell','Fibroblast','Mast cell','Myeloid cell','pDC','T cell')) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+dev.off()
+```
+
+```{r}
+#same confusion matrix but with relative %
+percent <- prop.table(as.matrix(as.data.frame.matrix(cm$table)),margin=2)
+percent <- percent*100 #% from proportions
+percent <- reshape2::melt(percent)
+colnames(percent) <- c('Prediction','Reference','Percentage')
+percent <- percent %>% mutate(across(c('Percentage'), round, 2)) #round to 2 decimal places
+
+#plot
+pdf(file = paste0(dir.out,"cm.percent.pdf"),width = 11, height = 8.5)
+
+ggplot(percent, aes(x=Reference, y=Prediction, fill=Percentage)) + 
+  theme_manuscript() +
+  geom_tile(color = 'grey60') +
+  geom_text(aes(label=Percentage), color="black", size = 7, fontface = "bold") +
+  xlab(bquote("Reference from Bassez" ~italic("et al."))) +
+  ylab("Re-annotation") +
+  scale_fill_gradientn(colours = c('white','azure','lightcyan','lightskyblue1','lightblue','lightskyblue3','skyblue4'),
+                       limits = c(0,100),
+                       breaks = c(0,25,50,75,100),
+                       labels = c('0','25','50','75','100')) +
+  theme(legend.position='right', legend.direction='vertical') +
+  scale_x_discrete(labels=c('B cell','Cancer cell','Endothelial cell','Fibroblast','Mast cell','Myeloid cell','pDC','T cell')) +
+  scale_y_discrete(labels=c('B cell','Cancer cell','Endothelial cell','Fibroblast','Mast cell','Myeloid cell','pDC','T cell')) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+dev.off()
+```
+
+## Cell Types Putative Markers
+
+```{r}
+#pseudobulk per cell type
+summed <- aggregateAcrossCells(sce_final, 
+    id=colData(sce_final)[,"type"])
+
+#markers used to define cell types
+markers <- c('TRBC1','TRBC2','CD3D',
+             'CD4','CD8A','CD8B','TRAC',
+             'CD79A','CD79B','CD19',
+             'JCHAIN','MZB1','IGLC3',
+             'KRT5','KRT15','LAMB3',
+             "EPCAM","CLDN7",'KRT18',
+             'TPSAB1','TPSB2','HPGDS',
+             'IL3RA','CLEC4C','NRP1',
+             'CD68','TYROBP','CXCL16',
+             'PECAM1','ADGRL4','ENG',
+             'LUM','COL6A2','COL1A2')
+
+#get marker expressions
+marker.counts <- counts(summed)[markers,]
+
+#italicise gene symbols
+ital.genes <- lapply(
+  markers,
+  function(x) bquote(italic(.(x))))
+
+#to center the white color at value 0
+breaks <- c(seq(-0.5, 0, length.out = 20), seq(0.000000000000001, 3, length.out = 80))
+
+#plot
+pdf(file = paste0(dir.out,"markers.pdf"),height = 10)
+
+pheatmap(t(scale(t(marker.counts))),
+         cluster_rows = F,
+         cluster_cols = T,
+         border_color = "white",
+         cellwidth = 15,
+         cellheight = 15,
+         angle_col = 90,
+         color = colorRampPalette(c("#CDDCE3" ,"white","#E0A8A8", "#A82B2B", "#881414","#3C0000"))(100),
+         heatmap_legend_param = list(title = "Z-score"),
+         labels_row = as.expression(ital.genes),
+         breaks = breaks
+         )
+
+dev.off()
+```
+
+## Erythrocyte Artifacts Example
+
+```{r}
+#load metacell files
+rawcounts.meta <- readMM(paste0(dir.in,'metacell.counts.mtx'))
+
+#check that rawcounts is dgCMatrix and not dgTMatrix (both sparse, but dgCMatrix is the standard and it is more compressed)
+counts.meta <- as(rawcounts.meta, "CsparseMatrix") 
+
+cellMeta.meta <- read.csv(paste0(dir.in,'metacellMeta.csv'))
+
+geneMeta.meta <- read.csv(paste0(dir.in,'geneMeta.csv'))
+
+sce.meta <- SingleCellExperiment(list(counts = t(counts.meta)),colData = cellMeta.meta)
+
+colnames(sce.meta) <- cellMeta.meta$grouped
+rownames(sce.meta) <- geneMeta.meta$GeneName
+rowData(sce.meta) <- geneMeta.meta
+rm(counts.meta)
+```
+
+```{r}
+#extract hba2 and hbb expressions
+hba2 <- counts(sce.meta)["HBA2",]
+hbb <- counts(sce.meta)["HBB",]
+
+hb2.hbb <- data.frame(HBA2 = hba2, HBB = hbb)
+
+#plot
+pdf(file = paste0(dir.out,"hbb.pdf"), width = 13)
+
+ggplot(hb2.hbb, aes(x = HBA2, y = HBB, color = HBB+HBA2)) +
+    geom_point(alpha = 0.9, size = 6) +
+    scale_color_gradientn(colors =  c("grey95", "#A00F18"),
+                          breaks = c(0, 0.3, 0.6)) +
+    labs(x = bquote(italic("HBA2") ~ "expression"),
+         y = bquote(italic("HBB") ~ "expression"),
+         color = bquote(italic("HBB + HBA2") ~ "expression")) +
+    theme_manuscript() +
+  scale_x_continuous(breaks = c(0, 0.0025, 0.005, 0.0075, 0.01),  
+                    labels = c('0', '0.0025', '0.005', '0.0075', '0.01'))
+
+dev.off()
+```
+
+```{r}
+test <- counts(sce.meta)[,1]
+sum(test)
+```
